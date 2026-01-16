@@ -8,10 +8,9 @@ The model computes daily investment weights that determine how much of your DCA 
 
 1. **MVRV Z-score**: Buy more when undervalued (low MVRV), less when overvalued
 2. **Price vs 200-day MA**: Buy more when price is below long-term trend
-3. **4-year Halving Cycle Percentile**: Context from Bitcoin's halving cycle
-4. **MVRV Momentum**: Acceleration/deceleration of MVRV trends
-5. **Signal Confidence**: Amplify signals when multiple indicators agree
-6. **Volatility Dampening**: Reduce exposure during high uncertainty periods
+3. **MVRV Momentum**: Acceleration/deceleration of MVRV trends
+4. **Signal Confidence**: Amplify signals when multiple indicators agree
+5. **Volatility Dampening**: Reduce exposure during high uncertainty periods
 
 **Key Properties:**
 - Weights sum to exactly 1.0 for each date range (within tolerance of 1e-6)
@@ -35,16 +34,14 @@ flowchart LR
         MA200[200-Day SMA]
         MVRVZ[MVRV Z-Score<br/>365-day window]
         GRAD[MVRV Gradient<br/>30-day EMA]
-        PCT[MVRV Percentile<br/>4-year window]
         ACCEL[MVRV Acceleration<br/>14-day window]
         VOL[MVRV Volatility<br/>90-day window]
         ZONE[Zone Classification]
     end
     
     subgraph signals [Signal Processing]
-        VALUE[Value Signal<br/>70% weight]
+        VALUE[Value Signal<br/>80% weight]
         MASIG[MA Signal<br/>20% weight]
-        PCTSIG[Percentile Signal<br/>10% weight]
     end
     
     subgraph modifiers [Signal Modifiers]
@@ -63,7 +60,6 @@ flowchart LR
     P --> MA200
     M --> MVRVZ
     MVRVZ --> GRAD
-    MVRVZ --> PCT
     GRAD --> ACCEL
     MVRVZ --> VOL
     MVRVZ --> ZONE
@@ -76,11 +72,8 @@ flowchart LR
     GRAD --> TREND
     TREND --> MASIG
     
-    PCT --> PCTSIG
-    
     VALUE --> DYN
     MASIG --> DYN
-    PCTSIG --> DYN
     
     ACCEL --> DYN
     CONF --> DYN
@@ -102,15 +95,14 @@ Where:
 
 ## Signal Composition
 
-The model combines three primary signals with two modulation factors:
+The model combines two primary signals with modulation factors:
 
 ### Primary Signals (Weighted Combination)
 
 | Signal | Weight | Description |
 |--------|--------|-------------|
-| MVRV Value Signal | 70% | Low MVRV Z-score → buy more, with asymmetric extreme boost |
+| MVRV Value Signal | 80% | Low MVRV Z-score → buy more, with asymmetric extreme boost |
 | MA Signal | 20% | Below 200-day MA → buy more, with adaptive trend modulation |
-| Percentile Signal | 10% | 4-year percentile context from halving cycle |
 
 ### Signal Modifiers
 
@@ -168,21 +160,6 @@ mvrv_gradient = tanh(gradient_raw.ewm(span=30).mean() * 2)
 | `< 0` | MVRV falling (moving toward undervaluation) |
 | `≈ 0` | Neutral/stable |
 
-### 4-Year Rolling Percentile
-
-Captures Bitcoin's halving cycle context:
-
-```python
-mvrv_percentile = rolling_percentile(mvrv, window=1461)  # ~4 years
-# Result in [0, 1]
-```
-
-| Percentile | Interpretation |
-|------------|----------------|
-| < 0.25 | Bottom 25% of 4-year range (strong buy) |
-| 0.25-0.75 | Middle range (neutral) |
-| > 0.75 | Top 25% of 4-year range (reduce buying) |
-
 ### MVRV Acceleration
 
 Second derivative for momentum detection:
@@ -207,7 +184,7 @@ mvrv_volatility = percentile_rank(mvrv_zscore.rolling(90).std())
 Measures agreement between signals:
 
 ```python
-# When Z-score, percentile, and MA signals agree → confidence ≈ 1
+# When Z-score and MA signals agree → confidence ≈ 1
 # When signals disagree → confidence ≈ 0
 signal_confidence = agreement * 0.7 + gradient_alignment * 0.3
 ```
@@ -270,18 +247,15 @@ def compute_dynamic_multiplier(...):
     # 2. MA signal with adaptive trend modulation
     ma_signal = -price_vs_ma * trend_modifier
     
-    # 3. Percentile signal (non-linear emphasis on extremes)
-    pct_signal = sign(0.5 - percentile) * |2 * (0.5 - percentile)|^1.5
+    # 3. Combine with weights
+    combined = value_signal * 0.80 + ma_signal * 0.20
     
-    # 4. Combine with weights
-    combined = value_signal * 0.70 + ma_signal * 0.20 + pct_signal * 0.10
-    
-    # 5. Apply modifiers
+    # 4. Apply modifiers
     combined *= acceleration_modifier  # [0.85, 1.15]
     combined *= confidence_boost       # [1.0, 1.15] only if confidence > 0.7
     combined *= volatility_dampening   # [0.8, 1.0] only if volatility > 0.8
     
-    # 6. Scale and exponentiate
+    # 5. Scale and exponentiate
     adjustment = clip(combined * DYNAMIC_STRENGTH, -4, 4)
     return exp(adjustment)
 ```
@@ -318,7 +292,7 @@ Core weight computation for a date range using all enhanced features:
 ```python
 def compute_weights_fast(features_df, start_date, end_date) -> pd.Series:
     # Extract all features: price_vs_ma, mvrv_zscore, mvrv_gradient,
-    #   mvrv_percentile, mvrv_acceleration, mvrv_volatility, signal_confidence
+    #   mvrv_acceleration, mvrv_volatility, signal_confidence
     # Compute uniform base PDF
     # Apply dynamic multiplier with all signal layers
     # Return allocated weights
@@ -350,7 +324,6 @@ def compute_window_weights(features_df, start_date, end_date, current_date) -> p
 | MA_WINDOW | 200 | 200-day moving average window |
 | MVRV_GRADIENT_WINDOW | 30 | Window for MVRV gradient (EMA smoothed) |
 | MVRV_ROLLING_WINDOW | 365 | Window for MVRV Z-score normalization |
-| MVRV_CYCLE_WINDOW | 1461 | 4-year window for percentile (halving cycle) |
 | MVRV_ACCEL_WINDOW | 14 | Window for acceleration calculation |
 | MVRV_VOLATILITY_WINDOW | 90 | Window for volatility calculation |
 | DYNAMIC_STRENGTH | 3.0 | Weight adjustment multiplier |
@@ -375,7 +348,6 @@ All features computed by `precompute_features()`:
 | `price_vs_ma` | [-1, 1] | Normalized distance from 200-day MA |
 | `mvrv_zscore` | [-4, 4] | MVRV Z-score (365-day window) |
 | `mvrv_gradient` | [-1, 1] | Smoothed MVRV trend direction |
-| `mvrv_percentile` | [0, 1] | 4-year rolling percentile |
 | `mvrv_acceleration` | [-1, 1] | Second derivative of gradient |
 | `mvrv_zone` | {-2,-1,0,1,2} | Discrete zone classification |
 | `mvrv_volatility` | [0, 1] | Rolling volatility percentile |
@@ -411,13 +383,13 @@ A simple 200-day moving average strategy typically generates binary signals: buy
 
 #### 1. Multi-Signal Integration
 
-Instead of relying solely on price vs. MA, the model combines three weighted signals:
+Instead of relying solely on price vs. MA, the model combines two weighted signals:
 
 ```
-combined = MVRV_value × 0.70 + MA_signal × 0.20 + percentile_signal × 0.10
+combined = MVRV_value × 0.80 + MA_signal × 0.20
 ```
 
-The 200-day MA contributes only 20% of the final signal, acting as a secondary confirmation rather than the primary driver. The MVRV Z-score (70% weight) provides fundamental valuation context that the MA cannot.
+The 200-day MA contributes 20% of the final signal, acting as a secondary confirmation rather than the primary driver. The MVRV Z-score (80% weight) provides fundamental valuation context that the MA cannot.
 
 #### 2. Continuous vs. Binary Response
 
@@ -460,18 +432,7 @@ boost = -0.5 * (Z - 2.5)² - 0.3  # Strong reduction
 
 Extreme lows are rare opportunities; extreme highs often precede corrections.
 
-#### 5. 4-Year Halving Cycle Context
-
-The simple MA has no awareness of Bitcoin's halving cycle. Our model incorporates a 1,461-day (≈4 year) rolling percentile:
-
-```python
-mvrv_percentile = rolling_percentile(mvrv, window=1461)
-pct_signal = sign(0.5 - percentile) * |2 * (0.5 - percentile)|^1.5
-```
-
-This provides context for whether current conditions are historically cheap or expensive within the halving cycle.
-
-#### 6. Momentum and Acceleration Detection
+#### 5. Momentum and Acceleration Detection
 
 The simple MA is a lagging indicator with no momentum awareness. Our model adds:
 
@@ -482,7 +443,7 @@ The simple MA is a lagging indicator with no momentum awareness. Our model adds:
 accel_modifier = [0.85, 1.15]  # Amplify when momentum builds, dampen at reversals
 ```
 
-#### 7. Signal Confidence Weighting
+#### 6. Signal Confidence Weighting
 
 When multiple signals agree, the model increases conviction:
 
@@ -493,7 +454,7 @@ confidence_boost = 1.0 + 0.15 * (confidence - 0.7) / 0.3
 
 A simple MA model has no concept of signal agreement or confidence.
 
-#### 8. Volatility-Aware Dampening
+#### 7. Volatility-Aware Dampening
 
 During high uncertainty periods (volatility > 80th percentile), the model reduces signal strength:
 
@@ -508,8 +469,7 @@ This prevents overreaction during chaotic market conditions where the MA generat
 | Aspect | Simple 200-Day MA | Enhanced Model |
 |--------|-------------------|----------------|
 | Signal type | Binary (above/below) | Continuous with magnitude |
-| Valuation awareness | None | MVRV Z-score (70% weight) |
-| Cycle context | None | 4-year halving percentile |
+| Valuation awareness | None | MVRV Z-score (80% weight) |
 | Trend sensitivity | Fixed | Adaptive to MVRV regime |
 | Extreme response | Linear/symmetric | Asymmetric quadratic boost |
 | Momentum detection | None | Gradient + acceleration |

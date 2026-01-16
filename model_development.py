@@ -6,7 +6,6 @@ based on two primary signals:
 2. Price vs 200-day MA: Buy more when price is below long-term trend
 
 Enhanced MVRV utilization includes:
-- 4-year rolling percentile (captures full halving cycle)
 - MVRV acceleration (momentum detection)
 - Asymmetric extreme response (aggressive at lows, conservative at highs)
 - Zone-based regime classification
@@ -28,7 +27,6 @@ MIN_W = 1e-6
 MA_WINDOW = 200  # 200-day simple moving average
 MVRV_GRADIENT_WINDOW = 30  # Window for MVRV trend detection
 MVRV_ROLLING_WINDOW = 365  # Window for MVRV Z-score normalization
-MVRV_CYCLE_WINDOW = 1461  # 4-year window for percentile (halving cycle)
 MVRV_ACCEL_WINDOW = 14  # Window for acceleration calculation
 DYNAMIC_STRENGTH = 5.0  # Multiplier for weight adjustments
 
@@ -49,7 +47,6 @@ FEATS = [
     "price_vs_ma",
     "mvrv_zscore",
     "mvrv_gradient",
-    "mvrv_percentile",
     "mvrv_acceleration",
     "mvrv_zone",
     "mvrv_volatility",
@@ -73,29 +70,6 @@ def zscore(series: pd.Series, window: int) -> pd.Series:
     mean = series.rolling(window, min_periods=window // 2).mean()
     std = series.rolling(window, min_periods=window // 2).std()
     return ((series - mean) / std).fillna(0)
-
-
-def rolling_percentile(series: pd.Series, window: int) -> pd.Series:
-    """Compute rolling percentile rank (0 to 1).
-
-    Uses a 4-year window by default to capture the full Bitcoin halving cycle.
-
-    Args:
-        series: Input time series
-        window: Rolling window size (default 1461 = ~4 years)
-
-    Returns:
-        Series with percentile ranks in [0, 1]
-    """
-
-    def pct_rank(x: np.ndarray) -> float:
-        """Compute percentile rank of last value in array."""
-        if len(x) < 2:
-            return 0.5
-        rank = (x[-1] > x[:-1]).sum() / (len(x) - 1)
-        return float(rank)
-
-    return series.rolling(window, min_periods=window // 4).apply(pct_rank, raw=True)
 
 
 def classify_mvrv_zone(mvrv_zscore: np.ndarray) -> np.ndarray:
@@ -152,19 +126,17 @@ def compute_mvrv_volatility(mvrv_zscore: pd.Series, window: int) -> pd.Series:
 
 def compute_signal_confidence(
     mvrv_zscore: np.ndarray,
-    mvrv_percentile: np.ndarray,
     mvrv_gradient: np.ndarray,
     price_vs_ma: np.ndarray,
 ) -> np.ndarray:
     """Compute confidence score based on signal agreement.
 
     When multiple signals agree, confidence is high:
-    - Low Z-score + Low percentile + Rising gradient = High confidence buy
-    - High Z-score + High percentile + Falling gradient = High confidence reduce
+    - Low Z-score + Rising gradient = High confidence buy
+    - High Z-score + Falling gradient = High confidence reduce
 
     Args:
         mvrv_zscore: MVRV Z-score in [-4, 4]
-        mvrv_percentile: 4-year percentile in [0, 1]
         mvrv_gradient: Trend direction in [-1, 1]
         price_vs_ma: Price vs MA in [-1, 1]
 
@@ -173,8 +145,6 @@ def compute_signal_confidence(
     """
     # Normalize all signals to [-1, 1] where negative = buy signal
     z_signal = -mvrv_zscore / 4  # Normalize to [-1, 1]
-    pct_signal = 0.5 - mvrv_percentile  # [0,1] -> [-0.5, 0.5] -> scale to [-1, 1]
-    pct_signal = pct_signal * 2
     ma_signal = -price_vs_ma  # Below MA = buy signal
 
     # Gradient indicates momentum direction
@@ -187,7 +157,7 @@ def compute_signal_confidence(
     )
 
     # Calculate agreement: how many signals point the same direction?
-    signals = np.stack([z_signal, pct_signal, ma_signal], axis=0)
+    signals = np.stack([z_signal, ma_signal], axis=0)
     signal_std = signals.std(axis=0)
 
     # Low std = high agreement, high std = disagreement
@@ -242,7 +212,6 @@ def precompute_features(df: pd.DataFrame) -> pd.DataFrame:
     - price_vs_ma: Normalized distance from 200-day MA, clipped to [-1, 1]
     - mvrv_zscore: MVRV Z-score (365-day window), clipped to [-4, 4]
     - mvrv_gradient: Smoothed MVRV trend direction in [-1, 1]
-    - mvrv_percentile: 4-year rolling percentile [0, 1] (halving cycle context)
     - mvrv_acceleration: Second derivative of MVRV gradient (momentum)
     - mvrv_zone: Discrete zone classification [-2, -1, 0, 1, 2]
 
@@ -270,9 +239,6 @@ def precompute_features(df: pd.DataFrame) -> pd.DataFrame:
         # Core Z-score (365-day window)
         mvrv_z = zscore(mvrv, MVRV_ROLLING_WINDOW).clip(-4, 4)
 
-        # 4-year rolling percentile (captures full halving cycle)
-        mvrv_pct = rolling_percentile(mvrv, MVRV_CYCLE_WINDOW).fillna(0.5)
-
         # Smoothed gradient using EMA
         gradient_raw = mvrv_z.diff(MVRV_GRADIENT_WINDOW)
         gradient_smooth = gradient_raw.ewm(
@@ -299,7 +265,6 @@ def precompute_features(df: pd.DataFrame) -> pd.DataFrame:
         signal_confidence = pd.Series(0.5, index=price.index)
     else:
         mvrv_z = pd.Series(0.0, index=price.index)
-        mvrv_pct = pd.Series(0.5, index=price.index)
         mvrv_gradient = pd.Series(0.0, index=price.index)
         mvrv_acceleration = pd.Series(0.0, index=price.index)
         mvrv_zone = pd.Series(0, index=price.index)
@@ -314,7 +279,6 @@ def precompute_features(df: pd.DataFrame) -> pd.DataFrame:
             "price_vs_ma": price_vs_ma,
             "mvrv_zscore": mvrv_z,
             "mvrv_gradient": mvrv_gradient,
-            "mvrv_percentile": mvrv_pct,
             "mvrv_acceleration": mvrv_acceleration,
             "mvrv_zone": mvrv_zone,
             "mvrv_volatility": mvrv_volatility,
@@ -328,7 +292,6 @@ def precompute_features(df: pd.DataFrame) -> pd.DataFrame:
         "price_vs_ma",
         "mvrv_zscore",
         "mvrv_gradient",
-        "mvrv_percentile",
         "mvrv_acceleration",
         "mvrv_zone",
         "mvrv_volatility",
@@ -336,7 +299,6 @@ def precompute_features(df: pd.DataFrame) -> pd.DataFrame:
     features[signal_cols] = features[signal_cols].shift(1)
 
     # Fill NaN values with appropriate defaults
-    features["mvrv_percentile"] = features["mvrv_percentile"].fillna(0.5)
     features["mvrv_zone"] = features["mvrv_zone"].fillna(0)
     features["mvrv_volatility"] = features["mvrv_volatility"].fillna(0.5)
     features = features.fillna(0)
@@ -344,7 +306,6 @@ def precompute_features(df: pd.DataFrame) -> pd.DataFrame:
     # Compute signal confidence using lagged values (no look-ahead)
     features["signal_confidence"] = compute_signal_confidence(
         features["mvrv_zscore"].values,
-        features["mvrv_percentile"].values,
         features["mvrv_gradient"].values,
         features["price_vs_ma"].values,
     )
@@ -491,28 +452,6 @@ def compute_asymmetric_extreme_boost(mvrv_zscore: np.ndarray) -> np.ndarray:
     return boost
 
 
-def compute_percentile_signal(mvrv_percentile: np.ndarray) -> np.ndarray:
-    """Convert MVRV percentile to buy signal.
-
-    Uses 4-year rolling percentile to capture halving cycle context.
-
-    Args:
-        mvrv_percentile: Array of percentile values in [0, 1]
-
-    Returns:
-        Signal values (positive = buy more, negative = buy less)
-    """
-    # Transform [0, 1] to [-1, 1] with emphasis on extremes
-    # Percentile < 0.25 -> strong buy signal
-    # Percentile > 0.75 -> strong sell signal
-    centered = 0.5 - mvrv_percentile  # Now in [-0.5, 0.5], positive = undervalued
-
-    # Non-linear scaling to emphasize extremes
-    signal = np.sign(centered) * (2 * np.abs(centered)) ** 1.5
-
-    return np.clip(signal, -1, 1)
-
-
 def compute_acceleration_modifier(
     mvrv_acceleration: np.ndarray,
     mvrv_gradient: np.ndarray,
@@ -587,7 +526,6 @@ def compute_dynamic_multiplier(
     price_vs_ma: np.ndarray,
     mvrv_zscore: np.ndarray,
     mvrv_gradient: np.ndarray,
-    mvrv_percentile: np.ndarray | None = None,
     mvrv_acceleration: np.ndarray | None = None,
     mvrv_volatility: np.ndarray | None = None,
     signal_confidence: np.ndarray | None = None,
@@ -595,10 +533,8 @@ def compute_dynamic_multiplier(
     """Compute weight multiplier from MVRV and MA signals.
 
     Enhanced strategy with multiple MVRV signals:
-    - Primary (55%): MVRV value signal with asymmetric extreme boost
-    - Secondary (25%): MA signal with adaptive trend modulation
-    - Tertiary (15%): 4-year percentile context (halving cycle)
-    - Quaternary (5%): Mean reversion pressure
+    - Primary (80%): MVRV value signal with asymmetric extreme boost
+    - Secondary (20%): MA signal with adaptive trend modulation
 
     Modulated by:
     - Signal confidence: Amplify when signals agree
@@ -608,7 +544,6 @@ def compute_dynamic_multiplier(
         price_vs_ma: Distance from 200-day MA in [-1, 1]
         mvrv_zscore: MVRV Z-score in [-4, 4]
         mvrv_gradient: MVRV trend direction in [-1, 1]
-        mvrv_percentile: Optional 4-year rolling percentile [0, 1]
         mvrv_acceleration: Optional MVRV acceleration [-1, 1]
         mvrv_volatility: Optional volatility percentile [0, 1]
         signal_confidence: Optional confidence score [0, 1]
@@ -617,8 +552,6 @@ def compute_dynamic_multiplier(
         Multipliers centered around 1.0
     """
     # Default to neutral if not provided
-    if mvrv_percentile is None:
-        mvrv_percentile = np.full_like(mvrv_zscore, 0.5)
     if mvrv_acceleration is None:
         mvrv_acceleration = np.zeros_like(mvrv_zscore)
     if mvrv_volatility is None:
@@ -638,16 +571,13 @@ def compute_dynamic_multiplier(
     trend_modifier = compute_adaptive_trend_modifier(mvrv_gradient, mvrv_zscore)
     ma_signal = ma_signal * trend_modifier
 
-    # 4. Percentile signal: 4-year context
-    pct_signal = compute_percentile_signal(mvrv_percentile)
-
-    # 5. Acceleration modifier: momentum detection
+    # 4. Acceleration modifier: momentum detection
     accel_modifier = compute_acceleration_modifier(mvrv_acceleration, mvrv_gradient)
 
     # Combine signals with weights
-    # Primary: MVRV value (70%), Secondary: MA (20%), Tertiary: Percentile (10%)
+    # Primary: MVRV value (80%), Secondary: MA (20%)
     # Focus on core MVRV signal with asymmetric boost
-    combined = value_signal * 0.70 + ma_signal * 0.20 + pct_signal * 0.10
+    combined = value_signal * 0.80 + ma_signal * 0.20
 
     # Apply acceleration modifier (subtle: range [0.85, 1.15])
     accel_modifier_subtle = 0.85 + 0.30 * (accel_modifier - 0.5) / 0.5
@@ -722,13 +652,6 @@ def compute_weights_fast(
     mvrv_gradient = _clean_array(df["mvrv_gradient"].values)
 
     # Extract new features if available
-    if "mvrv_percentile" in df.columns:
-        mvrv_percentile = _clean_array(df["mvrv_percentile"].values)
-        # Replace 0 with 0.5 (neutral) for cleaner defaults
-        mvrv_percentile = np.where(mvrv_percentile == 0, 0.5, mvrv_percentile)
-    else:
-        mvrv_percentile = None
-
     if "mvrv_acceleration" in df.columns:
         mvrv_acceleration = _clean_array(df["mvrv_acceleration"].values)
     else:
@@ -751,7 +674,6 @@ def compute_weights_fast(
         price_vs_ma,
         mvrv_zscore,
         mvrv_gradient,
-        mvrv_percentile,
         mvrv_acceleration,
         mvrv_volatility,
         signal_confidence,
@@ -799,8 +721,6 @@ def compute_window_weights(
             index=missing,
         )
         # Set appropriate defaults for new features
-        if "mvrv_percentile" in placeholder.columns:
-            placeholder["mvrv_percentile"] = 0.5
         if "mvrv_zone" in placeholder.columns:
             placeholder["mvrv_zone"] = 0
         if "mvrv_volatility" in placeholder.columns:
